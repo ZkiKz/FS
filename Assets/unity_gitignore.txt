@@ -1,0 +1,150 @@
+# Unity项目标准.gitignore配置
+# 适用于Unity 2020+版本和团结引擎
+
+# ================
+# Unity生成的文件
+# ================
+
+# Unity编辑器和临时文件
+/[Ll]ibrary/
+/[Tt]emp/
+/[Oo]bj/
+/[Bb]uild/
+/[Bb]uilds/
+/[Ll]ogs/
+/[Uu]ser[Ss]ettings/
+
+# 内存分析器文件
+memorycapture-*.json
+
+# 项目设置文件（但保留必要的）
+# ProjectSettings/  # 注意：这个目录需要保留，但其中的某些文件可以忽略
+ProjectSettings/ProjectSettings.asset
+ProjectSettings/EditorBuildSettings.asset
+
+# ================
+# 自动生成的文件
+# ================
+
+# Visual Studio/MonoDevelop生成的文件
+ExportedObj/
+*.csproj
+*.unityproj
+*.sln
+*.suo
+*.tmp
+*.user
+*.userprefs
+*.pidb
+*.booproj
+*.svd
+*.pdb
+*.mdb
+*.opendb
+*.VC.db
+
+# Unity3D生成的文件
+*.pidb.meta
+*.pdb.meta
+*.mdb.meta
+
+# ================
+# OS生成的文件
+# ================
+
+# OSX
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# ================
+# 构建输出
+# ================
+
+# WebGL构建（可以保留，但通常不提交）
+/[Ww]eb[Gg][Ll]/
+
+# 其他平台构建
+/[Bb]uild[Ww]indows/
+/[Bb]uild[Mm]ac/
+/[Bb]uild[Ll]inux/
+/[Bb]uild[iI][Oo][Ss]/
+/[Bb]uild[Aa]ndroid/
+
+# ================
+# 包管理
+# ================
+
+# Package manager
+**/Packages/packages-lock.json
+Packages/packages-lock.json
+
+# ================
+# 团结引擎特定文件
+# ================
+
+# 团结引擎缓存和临时文件
+/[Tt]uanjie[Cc]ache/
+/[Tt]uanjie[Tt]emp/
+
+# ================
+# 资源文件（选择性忽略）
+# ================
+
+# 大型资源文件（建议使用Git LFS）
+# *.psd
+# *.tga
+# *.blend
+# *.fbx
+
+# 自动生成的资源文件
+**/*.asset.meta
+
+# ================
+# 日志和调试文件
+# ================
+
+# 日志文件
+*.log
+*.log.*
+
+# 崩溃转储文件
+crashlytics-build.properties
+
+# ================
+# 自定义忽略规则
+# ================
+
+# 项目特定的忽略规则
+# 例如：大型资源文件、测试构建等
+
+# 大型媒体文件（建议使用Git LFS）
+# **/Videos/*
+# **/Audio/LargeFiles/*
+
+# 测试和调试构建
+/[Tt]est[Bb]uild/
+/[Dd]ebug[Bb]uild/
+
+# ================
+# 重要说明
+# ================
+
+# 需要提交的重要文件：
+# - Assets/ 目录（包含所有游戏资源）
+# - ProjectSettings/ 目录（项目设置）
+# - Packages/manifest.json（包依赖）
+# - 脚本文件（.cs）
+# - 场景文件（.unity）
+
+# 建议使用Git LFS管理大型文件：
+# *.psd filter=lfs diff=lfs merge=lfs -text
+# *.tga filter=lfs diff=lfs merge=lfs -text
+# *.blend filter=lfs diff=lfs merge=lfs -text
+# *.fbx filter=lfs diff=lfs merge=lfs -text
+# *.wav filter=lfs diff=lfs merge=lfs -text
+# *.mp4 filter=lfs diff=lfs merge=lfs -text
