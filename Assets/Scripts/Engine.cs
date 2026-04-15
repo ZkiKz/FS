@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Linq;
 using UnityEngine;
 
 namespace FuSheng
@@ -8,7 +9,7 @@ namespace FuSheng
         /** 初始游戏状态 */
         public static GameState CreateGame()
         {
-            var initialStats = new PlayerStatsImpl(100, 1000, 500, 50, 1);
+            var initialStats = new PlayerStatsImpl(100, 1000, 500, 0, 100, 1);
 
             // 随机选择初始城市
             var randomCity = Data.CITIES[Random.Range(0, Data.CITIES.Count)];
@@ -79,6 +80,7 @@ namespace FuSheng
                 Mathf.Max(0, Mathf.Min(100, s.Health)),
                 Mathf.Max(0, s.Gold),
                 Mathf.Max(0, s.Debt),
+                Mathf.Max(0, s.Deposit),
                 Mathf.Max(10, s.Capacity),
                 Mathf.Max(0, s.Days)
             );
@@ -106,11 +108,15 @@ namespace FuSheng
             if (gs.CurrentCity == cityId)
                 return gs;
 
-            // 移动到不同城池：消耗健康并增加天数
+            // 移动到不同城池：消耗健康并增加天数，同时结算负债/存款利息
+            int debtInterest = Mathf.RoundToInt(gs.Stats.Debt * 0.10f);
+            int depositInterest = Mathf.RoundToInt(gs.Stats.Deposit * 0.01f);
             var newStats = ClampStats(new PlayerStatsImpl(gs.Stats)
             {
                 Health = gs.Stats.Health - 2,
-                Days = gs.Stats.Days + 1
+                Days = gs.Stats.Days + 1,
+                Debt = gs.Stats.Debt + debtInterest,
+                Deposit = gs.Stats.Deposit + depositInterest
             });
 
             // 为目标城市重新生成商品列表（根据概率）
@@ -197,38 +203,17 @@ namespace FuSheng
                 return gs;
             }
 
-            // 更新库存
-            var newInventory = new List<InventoryItem>();
-            bool found = false;
-            foreach (var item in gs.Inventory)
+            // 更新库存 - 每次购买都创建新记录，不合并
+            var newInventory = new List<InventoryItem>(gs.Inventory);
+            
+            // 添加新的购买记录
+            newInventory.Add(new InventoryItem
             {
-                if (item.CommodityId == commodityId)
-                {
-                    newInventory.Add(new InventoryItem
-                    {
-                        CommodityId = item.CommodityId,
-                        Quantity = item.Quantity + quantity,
-                        PurchasePrice = item.PurchasePrice,
-                        PurchaseDay = item.PurchaseDay
-                    });
-                    found = true;
-                }
-                else
-                {
-                    newInventory.Add(item);
-                }
-            }
-
-            if (!found)
-            {
-                newInventory.Add(new InventoryItem
-                {
-                    CommodityId = commodityId,
-                    Quantity = quantity,
-                    PurchasePrice = currentPrice,
-                    PurchaseDay = gs.Day
-                });
-            }
+                CommodityId = commodityId,
+                Quantity = quantity,
+                PurchasePrice = currentPrice,
+                PurchaseDay = gs.Day
+            });
 
             // 更新资金
             var newStats = ClampStats(new PlayerStatsImpl(gs.Stats)
@@ -256,15 +241,21 @@ namespace FuSheng
         /** 出售商品 */
         public static GameState SellCommodity(GameState gs, string commodityId, string cityId, int quantity)
         {
-            var existingItem = gs.Inventory.Find(item => item.CommodityId == commodityId);
+            // 获取所有该商品的库存记录
+            var commodityItems = gs.Inventory.Where(item => item.CommodityId == commodityId).ToList();
+            
+            // 计算总数量
+            int totalQuantity = commodityItems.Sum(item => item.Quantity);
             
             // 检查库存是否足够
-            if (existingItem == null || existingItem.Quantity < quantity)
+            if (totalQuantity < quantity)
                 return gs;
             
-            // 检查是否当天购买的商品（防止刷钱漏洞）
-            if (existingItem.PurchaseDay == gs.Day)
-                return gs;
+            // 检查是否有非当天购买的商品
+            var availableItems = commodityItems.Where(item => item.PurchaseDay != gs.Day).ToList();
+            int availableQuantity = availableItems.Sum(item => item.Quantity);
+            if (availableQuantity < quantity)
+                return gs; // 可出售的数量不足
 
             var commodity = Data.GetCommodity(commodityId);
             var currentPrice = gs.MarketPrices.Find(p => 
@@ -274,28 +265,50 @@ namespace FuSheng
             if (commodity == null || currentPrice <= 0)
                 return gs;
 
-            // 计算利润
-            var purchaseCost = existingItem.PurchasePrice * quantity;
-            var saleRevenue = currentPrice * quantity;
-
-            // 更新库存
+            // 按购买日期排序，优先出售最早购买的（FIFO）
+            var sortedItems = availableItems.OrderBy(item => item.PurchaseDay).ThenBy(item => item.PurchasePrice).ToList();
+            
+            // 计算总收入和更新库存
+            int remainingToSell = quantity;
+            int totalRevenue = 0;
             var newInventory = new List<InventoryItem>();
-            foreach (var item in gs.Inventory)
+            
+            // 先处理需要出售的商品
+            foreach (var item in sortedItems)
             {
-                if (item.CommodityId == commodityId)
+                if (remainingToSell <= 0)
                 {
-                    if (item.Quantity > quantity)
-                    {
-                        newInventory.Add(new InventoryItem
-                        {
-                            CommodityId = item.CommodityId,
-                            Quantity = item.Quantity - quantity,
-                            PurchasePrice = item.PurchasePrice,
-                            PurchaseDay = item.PurchaseDay
-                        });
-                    }
+                    // 已经满足出售数量，保留剩余商品
+                    newInventory.Add(item);
+                    continue;
+                }
+                
+                if (item.Quantity <= remainingToSell)
+                {
+                    // 全部出售这个批次
+                    totalRevenue += currentPrice * item.Quantity;
+                    remainingToSell -= item.Quantity;
+                    // 不添加到新库存中（已出售）
                 }
                 else
+                {
+                    // 部分出售这个批次
+                    totalRevenue += currentPrice * remainingToSell;
+                    newInventory.Add(new InventoryItem
+                    {
+                        CommodityId = item.CommodityId,
+                        Quantity = item.Quantity - remainingToSell,
+                        PurchasePrice = item.PurchasePrice,
+                        PurchaseDay = item.PurchaseDay
+                    });
+                    remainingToSell = 0;
+                }
+            }
+            
+            // 添加其他种类的商品
+            foreach (var item in gs.Inventory)
+            {
+                if (item.CommodityId != commodityId)
                 {
                     newInventory.Add(item);
                 }
@@ -304,7 +317,7 @@ namespace FuSheng
             // 更新资金
             var newStats = ClampStats(new PlayerStatsImpl(gs.Stats)
             {
-                Gold = gs.Stats.Gold + saleRevenue
+                Gold = gs.Stats.Gold + totalRevenue
             });
 
             return new GameState
@@ -383,20 +396,145 @@ namespace FuSheng
                     FinalRank = ""
                 };
             }
+            else if (operation == "deposit")
+            {
+                // 存款
+                if (gs.Stats.Gold < amount)
+                    return gs;
+                
+                var newStats = ClampStats(new PlayerStatsImpl(gs.Stats)
+                {
+                    Gold = gs.Stats.Gold - amount,
+                    Deposit = gs.Stats.Deposit + amount
+                });
+
+                return new GameState
+                {
+                    Phase = gs.Phase,
+                    Day = gs.Day,
+                    MaxDays = gs.MaxDays,
+                    Stats = newStats,
+                    CurrentCity = gs.CurrentCity,
+                    Inventory = new List<InventoryItem>(gs.Inventory),
+                    MarketPrices = new List<MarketPrice>(gs.MarketPrices),
+                    Logs = new List<DayLog>(gs.Logs),
+                    CurrentEvent = gs.CurrentEvent,
+                    DayResult = null,
+                    FinalScore = 0,
+                    FinalRank = ""
+                };
+            }
+            else if (operation == "withdraw")
+            {
+                // 取款
+                if (gs.Stats.Deposit < amount)
+                    return gs;
+                
+                var newStats = ClampStats(new PlayerStatsImpl(gs.Stats)
+                {
+                    Gold = gs.Stats.Gold + amount,
+                    Deposit = gs.Stats.Deposit - amount
+                });
+
+                return new GameState
+                {
+                    Phase = gs.Phase,
+                    Day = gs.Day,
+                    MaxDays = gs.MaxDays,
+                    Stats = newStats,
+                    CurrentCity = gs.CurrentCity,
+                    Inventory = new List<InventoryItem>(gs.Inventory),
+                    MarketPrices = new List<MarketPrice>(gs.MarketPrices),
+                    Logs = new List<DayLog>(gs.Logs),
+                    CurrentEvent = gs.CurrentEvent,
+                    DayResult = null,
+                    FinalScore = 0,
+                    FinalRank = ""
+                };
+            }
             return gs;
         }
 
-        /** 医院治疗 */
-        public static GameState HospitalTreatment(GameState gs)
+        /** 获取治疗价格（每10点健康） */
+        public static int GetTreatmentCost(int day)
         {
-            const int cost = 30; // 治疗费用
+            if (day <= 10)
+                return 100;
+            else if (day <= 20)
+                return 500;
+            else if (day <= 30)
+                return 1000;
+            else
+                return 10000;
+        }
+
+        /** 计算治疗花费 */
+        public static int CalculateTreatmentCost(int day, int healthToRecover)
+        {
+            int costPer10 = GetTreatmentCost(day);
+            return (healthToRecover + 9) / 10 * costPer10; // 向上取整到10的倍数
+        }
+
+        /** 医院治疗 - 治疗一次（恢复10点健康） */
+        public static GameState HospitalTreatmentOnce(GameState gs)
+        {
+            int cost = GetTreatmentCost(gs.Day);
+            
             if (gs.Stats.Gold < cost)
                 return gs;
+
+            if (gs.Stats.Health >= 100)
+                return gs; // 健康已满
 
             var newStats = ClampStats(new PlayerStatsImpl(gs.Stats)
             {
                 Gold = gs.Stats.Gold - cost,
-                Health = Mathf.Min(100, gs.Stats.Health + 40)
+                Health = Mathf.Min(100, gs.Stats.Health + 10)
+            });
+
+            return new GameState
+            {
+                Phase = gs.Phase,
+                Day = gs.Day,
+                MaxDays = gs.MaxDays,
+                Stats = newStats,
+                CurrentCity = gs.CurrentCity,
+                Inventory = new List<InventoryItem>(gs.Inventory),
+                MarketPrices = new List<MarketPrice>(gs.MarketPrices),
+                Logs = new List<DayLog>(gs.Logs),
+                CurrentEvent = gs.CurrentEvent,
+                DayResult = null,
+                FinalScore = gs.FinalScore,
+                FinalRank = gs.FinalRank,
+                EndMessage = gs.EndMessage
+            };
+        }
+
+        /** 医院治疗 - 治疗全部（恢复到100健康） */
+        public static GameState HospitalTreatmentAll(GameState gs)
+        {
+            if (gs.Stats.Health >= 100)
+                return gs; // 健康已满
+
+            int healthToRecover = 100 - gs.Stats.Health;
+            int totalCost = CalculateTreatmentCost(gs.Day, healthToRecover);
+
+            if (gs.Stats.Gold < totalCost)
+            {
+                // 钱不够，治疗能治疗的部分
+                int costPer10 = GetTreatmentCost(gs.Day);
+                int affordableUnits = gs.Stats.Gold / costPer10;
+                if (affordableUnits == 0)
+                    return gs; // 钱不够治疗一次
+
+                healthToRecover = affordableUnits * 10;
+                totalCost = affordableUnits * costPer10;
+            }
+
+            var newStats = ClampStats(new PlayerStatsImpl(gs.Stats)
+            {
+                Gold = gs.Stats.Gold - totalCost,
+                Health = Mathf.Min(100, gs.Stats.Health + healthToRecover)
             });
 
             return new GameState
@@ -452,37 +590,103 @@ namespace FuSheng
             if (gs.CurrentEvent == null)
                 return gs;
 
+            if (gs.CurrentEvent.Type != EventType.Choice)
+                return gs;
+
             if (choiceIndex < 0 || choiceIndex >= gs.CurrentEvent.Choices.Count)
                 return gs;
 
             var choice = gs.CurrentEvent.Choices[choiceIndex];
 
-            // 应用事件效果
-            var newStats = new PlayerStatsImpl(gs.Stats);
-            foreach (var effect in choice.Effects)
+            var newStats = ApplyEventEffects(gs.Stats, choice.Effects, choice.PercentEffects);
+            var effectText = BuildEffectText(choice.Effects, choice.PercentEffects);
+
+            return CreateResolvedEventState(gs, newStats, choice.ResultText, effectText);
+        }
+
+        /** 处理输入型事件 */
+        public static GameState ResolveInputEvent(GameState gs, string answerText)
+        {
+            if (gs.CurrentEvent == null)
+                return gs;
+
+            if (gs.CurrentEvent.Type != EventType.Input)
+                return gs;
+
+            bool isCorrect = int.TryParse(answerText, out int answer)
+                && Mathf.Abs(answer - gs.CurrentEvent.CorrectAnswer) <= gs.CurrentEvent.AnswerTolerance;
+
+            var newStats = ApplyEventEffects(
+                gs.Stats,
+                isCorrect ? gs.CurrentEvent.CorrectEffects : gs.CurrentEvent.WrongEffects,
+                isCorrect ? gs.CurrentEvent.CorrectPercentEffects : gs.CurrentEvent.WrongPercentEffects);
+            var effectText = BuildEffectText(
+                isCorrect ? gs.CurrentEvent.CorrectEffects : gs.CurrentEvent.WrongEffects,
+                isCorrect ? gs.CurrentEvent.CorrectPercentEffects : gs.CurrentEvent.WrongPercentEffects);
+
+            var resultText = isCorrect
+                ? gs.CurrentEvent.CorrectResultText
+                : $"{gs.CurrentEvent.WrongResultText}\n正确答案是 {gs.CurrentEvent.CorrectAnswer}。";
+
+            return CreateResolvedEventState(gs, newStats, resultText, effectText);
+        }
+
+        private static PlayerStatsImpl ApplyEventEffects(
+            PlayerStats sourceStats,
+            Dictionary<string, int> fixedEffects,
+            Dictionary<string, float> percentEffects)
+        {
+            var newStats = new PlayerStatsImpl(sourceStats);
+
+            if (fixedEffects != null)
             {
-                switch (effect.Key)
+                foreach (var effect in fixedEffects)
                 {
-                    case "Health":
-                        newStats.Health += effect.Value;
-                        break;
-                    case "Gold":
-                        newStats.Gold += effect.Value;
-                        break;
-                    case "Debt":
-                        newStats.Debt += effect.Value;
-                        break;
-                    case "Capacity":
-                        newStats.Capacity += effect.Value;
-                        break;
-                    case "Days":
-                        newStats.Days += effect.Value;
-                        break;
+                    switch (effect.Key)
+                    {
+                        case "Health":
+                            newStats.Health += effect.Value;
+                            break;
+                        case "Gold":
+                            newStats.Gold += effect.Value;
+                            break;
+                        case "Debt":
+                            newStats.Debt += effect.Value;
+                            break;
+                        case "Deposit":
+                            newStats.Deposit += effect.Value;
+                            break;
+                        case "Days":
+                            newStats.Days += effect.Value;
+                            break;
+                    }
                 }
             }
 
-            newStats = (PlayerStatsImpl)ClampStats(newStats);
+            if (percentEffects != null)
+            {
+                foreach (var effect in percentEffects)
+                {
+                    switch (effect.Key)
+                    {
+                        case "Gold":
+                            newStats.Gold += Mathf.RoundToInt(sourceStats.Gold * effect.Value);
+                            break;
+                        case "Debt":
+                            newStats.Debt += Mathf.RoundToInt(sourceStats.Debt * effect.Value);
+                            break;
+                        case "Deposit":
+                            newStats.Deposit += Mathf.RoundToInt(sourceStats.Deposit * effect.Value);
+                            break;
+                    }
+                }
+            }
 
+            return (PlayerStatsImpl)ClampStats(newStats);
+        }
+
+        private static GameState CreateResolvedEventState(GameState gs, PlayerStatsImpl newStats, string resultText, string effectText)
+        {
             return new GameState
             {
                 Phase = GamePhase.Playing,
@@ -496,8 +700,62 @@ namespace FuSheng
                 CurrentEvent = null,
                 DayResult = null,
                 FinalScore = 0,
-                FinalRank = ""
+                FinalRank = "",
+                LastEventResultText = resultText,
+                LastEventEffectText = effectText
             };
+        }
+
+        private static string BuildEffectText(Dictionary<string, int> fixedEffects, Dictionary<string, float> percentEffects)
+        {
+            var parts = new List<string>();
+
+            if (percentEffects != null)
+            {
+                foreach (var effect in percentEffects)
+                {
+                    string label = GetEffectLabel(effect.Key);
+                    string sign = effect.Value >= 0 ? "+" : "-";
+                    int percent = Mathf.RoundToInt(Mathf.Abs(effect.Value) * 100f);
+                    parts.Add($"{label} {sign} {percent}%");
+                }
+            }
+
+            if (fixedEffects != null)
+            {
+                foreach (var effect in fixedEffects)
+                {
+                    string label = GetEffectLabel(effect.Key);
+                    string sign = effect.Value >= 0 ? "+" : "-";
+                    int value = Mathf.Abs(effect.Value);
+                    string unit = effect.Key == "Health" ? "点" : "";
+                    parts.Add($"{label} {sign} {value}{unit}");
+                }
+            }
+
+            if (parts.Count == 0)
+                return "无属性变化";
+
+            return string.Join("，", parts);
+        }
+
+        private static string GetEffectLabel(string key)
+        {
+            switch (key)
+            {
+                case "Gold":
+                    return "银两";
+                case "Debt":
+                    return "负债";
+                case "Deposit":
+                    return "存款";
+                case "Health":
+                    return "健康";
+                case "Days":
+                    return "天数";
+                default:
+                    return key;
+            }
         }
 
         /** 检查游戏危险状态 */
@@ -535,12 +793,16 @@ namespace FuSheng
             // 根据千古风流原版玩法：健康值低于60需要治疗，否则每天下降5点
             int healthLoss = gs.Stats.Health <= 60 ? 5 : 2;
             
-            // 根据千古风流原版玩法：负债利息较高，需要尽快还清
-            int interest = Mathf.Max(10, Mathf.RoundToInt(gs.Stats.Debt * 0.03f));
+            // 负债利息：每天10%，每日结算累加
+            int debtInterest = Mathf.RoundToInt(gs.Stats.Debt * 0.10f);
+            
+            // 存款利息：每天1%
+            int depositInterest = Mathf.RoundToInt(gs.Stats.Deposit * 0.01f);
             
             var newStats = ClampStats(new PlayerStatsImpl(gs.Stats)
             {
-                Debt = gs.Stats.Debt + interest,
+                Debt = gs.Stats.Debt + debtInterest,
+                Deposit = gs.Stats.Deposit + depositInterest,
                 Health = gs.Stats.Health - healthLoss,
                 Days = gs.Stats.Days + 1
             });
@@ -572,8 +834,8 @@ namespace FuSheng
                 });
             }
 
-            // 检查游戏结束条件 - 健康<=0或余额<0立即结束
-            if (newStats.Health <= 0 || newStats.Gold < 0 || gs.Day >= gs.MaxDays)
+            // 检查游戏结束条件 - 健康<=0或余额<0或天数>=40立即结束
+            if (newStats.Health <= 0 || newStats.Gold < 0 || newStats.Days >= gs.MaxDays)
             {
                 var (score, rank) = CalcFinalScore(newStats, gs.Inventory);
                 
@@ -581,15 +843,15 @@ namespace FuSheng
                 string endMessage = "";
                 if (newStats.Health <= 0)
                 {
-                    endMessage = "💀 不治而亡！你的健康值已归零，游戏结束。";
+                    endMessage = "不治而亡！你的健康值已归零，游戏结束。";
                 }
                 else if (newStats.Gold < 0)
                 {
-                    endMessage = "💸 破产！你的银两已为负数，游戏结束。";
+                    endMessage = "破产！你的银两已为负数，游戏结束。";
                 }
-                else if (gs.Day >= gs.MaxDays)
+                else if (newStats.Days >= gs.MaxDays)
                 {
-                    endMessage = "⏰ 时间到！四十天期限已满，游戏结束。";
+                    endMessage = "时间到！四十天期限已满，游戏结束。";
                 }
                 
                 return new GameState
@@ -668,6 +930,61 @@ namespace FuSheng
                 rank = "💀 破产逃亡 · 无面具";
 
             return (score, rank);
+        }
+
+        /** 计算扩容价格 */
+        public static int CalculateExpansionCost(int expansionCount)
+        {
+            // 固定价格25000
+            return 25000;
+        }
+
+        /** 检查是否可以扩容 */
+        public static bool CanExpand(GameState gs, int quantity)
+        {
+            int totalCost = quantity * CalculateExpansionCost(gs.Stats.ExpansionCount);
+            return gs.Stats.Gold >= totalCost;
+        }
+
+        /** 执行扩容操作 */
+        public static GameState ExpandCapacity(GameState gs, int quantity)
+        {
+            if (quantity <= 0)
+                return gs;
+
+            // 计算总花费（固定价格，无折扣）
+            int totalCost = quantity * CalculateExpansionCost(gs.Stats.ExpansionCount);
+
+            // 检查资金是否足够
+            if (gs.Stats.Gold < totalCost)
+                return gs;
+
+            // 更新状态
+            var newStats = new PlayerStatsImpl(gs.Stats)
+            {
+                Gold = gs.Stats.Gold - totalCost,
+                Capacity = gs.Stats.Capacity + (quantity * 10),
+                ExpansionCount = gs.Stats.ExpansionCount + quantity
+            };
+
+            newStats = (PlayerStatsImpl)ClampStats(newStats);
+
+            return new GameState
+            {
+                Phase = gs.Phase,
+                Day = gs.Day,
+                MaxDays = gs.MaxDays,
+                Stats = newStats,
+                CurrentCity = gs.CurrentCity,
+                Inventory = new List<InventoryItem>(gs.Inventory),
+                MarketPrices = new List<MarketPrice>(gs.MarketPrices),
+                Logs = new List<DayLog>(gs.Logs),
+                CurrentEvent = gs.CurrentEvent,
+                DayResult = null,
+                FinalScore = gs.FinalScore,
+                FinalRank = gs.FinalRank,
+                EndMessage = gs.EndMessage
+            };
         }
     }
 }
